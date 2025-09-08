@@ -18,26 +18,6 @@ class MQTTClient:
 
     def __init__(self, client_id:str, server:str, port:int=0, user:str=None, password:str=None, keepalive:int=0,
                  ssl:bool=False, ssl_params:dict=None, socket_timeout:int=5, message_timeout:int=10):
-        """
-        Initializes MQTTClient object.
-
-        :param client_id: Unique MQTT ID attached to client. It must be unique for each client.
-        :param server: MQTT host address.
-        :param port: MQTT Port, typically 1883. If unset, the port number will default to 1883 of 8883 base on ssl.
-        :param user: Username if your server requires it.
-        :param password: Password if your server requires it.
-        :param keepalive: The Keep Alive is a time interval measured in seconds since the last
-                          correct control packet was received.
-        :param ssl: Require SSL for the connection.
-        :param ssl_params: Required SSL parameters. Kwargs from function ssl.wrap_socket.
-                           See documentation: https://docs.micropython.org/en/latest/library/ssl.html#ssl.ssl.wrap_socket
-                           For esp8266, please refer to the capabilities of the axTLS library applied to the micropython port.
-                           https://axtls.sourceforge.net
-        :param socket_timeout: The time in seconds after which the socket interrupts the connection to the server when
-                               no data exchange takes place. None - socket blocking, positive number - seconds to wait.
-        :param message_timeout: The time in seconds after which the library recognizes that a message with QoS=1
-                                or topic subscription has not been received by the server.
-        """
         if port == 0:
             port = 8883 if ssl else 1883
         self.client_id = client_id
@@ -69,16 +49,6 @@ class MQTTClient:
         self.message_timeout = message_timeout
 
     def _read(self, n:int):
-        """
-        Private class method.
-        
-        :param n: Expected length of read bytes
-
-        Notes:
-        Current usocket implementation returns None on .read from
-        non-blocking socket with no data. However, OSError
-        EAGAIN is checked for in case this ever changes.
-        """
         if n < 0:
             raise MQTTException(2)
         msg = b''
@@ -102,13 +72,6 @@ class MQTTClient:
         return msg
 
     def _write(self, bytes_wr:bytes, length:int=-1):
-        """
-        Private class method.
-        
-        :param bytes_wr: Bytes sequence for writing
-        :param length: Expected length of write bytes
-        """
-        # In non-blocking socket mode, the entire block of data may not be sent.
         try:
             self._sock_timeout(self.poller_w, self.socket_timeout)
             out = self.sock.write(bytes_wr, length)
@@ -123,22 +86,11 @@ class MQTTClient:
         return out
 
     def _send_str(self, s:bytes):
-        """
-        Private class method.
-        
-        :param s:
-        """
         assert len(s) < 65536
         self._write(len(s).to_bytes(2, 'big'))
         self._write(s)
 
     def _recv_len(self):
-        """
-        Reads the variable length of the MQTT packet.
-        Returns the length of the packet.
-        
-        :return: Length of the packet
-        """
         n = 0
         sh = 0
         while 1:
@@ -149,14 +101,6 @@ class MQTTClient:
             sh += 7
 
     def _varlen_encode(self, value:int, buf:bytearray, offset:int=0):
-        """
-        Encodes a variable length integer into the buffer.
-        
-        :param value: The integer value to encode
-        :param buf: The buffer to write the encoded value into
-        :param offset: The offset in the buffer where to start writing
-        :return: The new offset after writing the encoded value
-        """
         assert value < 268435456  # 2**28, i.e. max. four 7-bit bytes
         while value > 0x7f:
             buf[offset] = (value & 0x7f) | 0x80
@@ -166,24 +110,8 @@ class MQTTClient:
         return offset + 1
 
     def _sock_timeout(self, poller:uselect.poll, socket_timeout:float):
-        """
-        Checks if the socket is ready for reading or writing.
-        If socket_timeout is None, it waits indefinitely.
-        If socket_timeout is a positive number, it waits for that many seconds.
-
-        :param poller: Poller object to check the socket status
-        :param socket_timeout: Timeout in seconds, None for blocking mode
-        :raises MQTTException: If the socket is not ready or an error occurs
-        """
         if self.sock:
             res = poller.poll(-1 if socket_timeout is None else int(socket_timeout * 1000))
-            # https://github.com/micropython/micropython/issues/3747#issuecomment-385650294
-            # Sockets on esp8266 don't return POLLHUP or POLLERR at all.
-            # If a connection is broken then the socket will become readable and a read on it will return b''.
-            # POLLIN(value:1) - you have something to read
-            # POLLHUP(value:16) - your input is ended
-            # POLLIN(1) & POLLHUP(16) = 17 - that meanss that your input is ended and that your have still
-            #                                something to read from the buffer
             if res:
                 for fd, flag in res:
                     if (not flag & uselect.POLLIN) and (flag & uselect.POLLHUP):
@@ -196,39 +124,12 @@ class MQTTClient:
             raise MQTTException(28)
 
     def set_callback(self, f:callable):
-        """
-        Set callback for received subscription messages.
-        
-        :param f: callable(topic, msg, retained, duplicate)
-        """
         self.cb = f
 
     def set_callback_status(self, f:callable):
-        """
-        Set the callback for information about whether the sent packet (QoS=1)
-        or subscription was received or not by the server.
-        
-        :param f: callable(pid, status)
-
-        Where:
-            status = 0 - timeout
-            status = 1 - successfully delivered
-            status = 2 - Unknown PID. It is also possible that the PID is outdated,
-                         i.e. it came out of the message timeout.
-        """
         self.cbstat = f
 
     def set_last_will(self, topic:bytes, msg:bytes, retain:bool=False, qos:int=0):
-        """
-        Sets the last will and testament of the client. This is used to perform an action by the broker
-        in the event that the client "dies".
-        Learn more at https://www.hivemq.com/blog/mqtt-essentials-part-9-last-will-and-testament/
-        
-        :param topic: Topic of LWT. Takes the from "path/to/topic"
-        :param msg: Message to be published to LWT topic.
-        :param retain: Have the MQTT broker retain the message.
-        :param qos: Sets quality of service level. Accepts values 0 to 2. PLEASE NOTE qos=2 is not actually supported.
-        """
         assert 0 <= qos <= 2
         assert topic
         self.lw_topic = topic
@@ -237,12 +138,6 @@ class MQTTClient:
         self.lw_retain = retain
 
     def connect(self, clean_session:bool=True):
-        """
-        Establishes connection with the MQTT server.
-        
-        :param clean_session: Starts new session on true, resumes past session if false.
-        :return: Existing persistent session of the client from previous interactions.
-        """
         self.disconnect()
 
         ai = socket.getaddrinfo(self.server, self.port)[0]
@@ -268,28 +163,7 @@ class MQTTClient:
         self.poller_r.register(self.sock, uselect.POLLERR | uselect.POLLIN | uselect.POLLHUP)
         self.poller_w = uselect.poll()
         self.poller_w.register(self.sock, uselect.POLLOUT)
-
-        # Byte nr - desc
-        # 1 - \x10 0001 - Connect Command, 0000 - Reserved
-        # 2 - Remaining Length
-        # PROTOCOL NAME (3.1.2.1 Protocol Name)
-        # 3,4 - protocol name length len('MQTT')
-        # 5-8 = 'MQTT'
-        # PROTOCOL LEVEL (3.1.2.2 Protocol Level)
-        # 9 - mqtt version 0x04
-        # CONNECT FLAGS
-        # 10 - connection flags
-        #  X... .... = User Name Flag
-        #  .X.. .... = Password Flag
-        #  ..X. .... = Will Retain
-        #  ...X X... = QoS Level
-        #  .... .X.. = Will Flag
-        #  .... ..X. = Clean Session Flag
-        #  .... ...0 = (Reserved) It must be 0!
-        # KEEP ALIVE
-        # 11,12 - keepalive
-        # 13,14 - client ID length
-        # 15-15+len(client_id) - byte(client_id)
+        
         premsg = bytearray(b"\x10\0\0\0\0\0")
         msg = bytearray(b"\0\x04MQTT\x04\0\0\0")
 
@@ -337,9 +211,6 @@ class MQTTClient:
         return resp[2] & 1  # Is existing persistent session of the client from previous interactions.
 
     def disconnect(self):
-        """
-        Disconnects from the MQTT server.
-        """
         if not self.sock:
             return
         try:
@@ -359,22 +230,10 @@ class MQTTClient:
         self.sock = None
 
     def ping(self):
-        """
-        Pings the MQTT server.
-        """
         self._write(b"\xc0\0")
         self.last_ping = ticks_ms()
 
     def publish(self, topic:bytes, msg:bytes, retain:bool=False, qos:int=0, dup:bool=False):
-        """
-        Publishes a message to a specified topic.
-
-        :param topic: Topic you wish to publish to. Takes the form "path/to/topic"
-        :param msg: Message to publish to topic.
-        :param retain: Have the MQTT broker retain the message.
-        :param qos: Sets quality of service level. Accepts values 0 to 2. PLEASE NOTE qos=2 is not actually supported.
-        :param dup: Duplicate delivery of a PUBLISH Control Packet
-        """
         assert qos in (0, 1)
         pkt = bytearray(b"\x30\0\0\0\0")
         pkt[0] |= qos << 1 | retain | int(dup) << 3
@@ -393,13 +252,6 @@ class MQTTClient:
             return pid
 
     def subscribe(self, topic:bytes, qos:int=0):
-        """
-        Subscribes to a given topic.
-        
-        :param topic: Topic you wish to publish to. Takes the form "path/to/topic"
-        :param qos: Sets quality of service level. Accepts values 0 to 1. This gives the maximum QoS level at which
-                    the Server can send Application Messages to the Client.
-        """
         assert qos in (0, 1)
         assert self.cb is not None, "Subscribe callback is not set"
         pkt = bytearray(b"\x82\0\0\0\0\0\0")
@@ -414,11 +266,6 @@ class MQTTClient:
         return pid
 
     def _message_timeout(self):
-        """
-        Checks for messages that have not been received from the server within the message_timeout period.
-        If such messages are found, they are removed from the rcv_pids dictionary and the
-        cbstat callback is called with status 0 (timeout).
-        """
         curr_tick = ticks_ms()
         for pid, timeout in self.rcv_pids.items():
             if ticks_diff(timeout, curr_tick) <= 0:
@@ -426,18 +273,6 @@ class MQTTClient:
                 self.cbstat(pid, 0)
 
     def check_msg(self):
-        """
-        Checks whether a pending message from server is available.
-
-        If socket_timeout=None, this is the socket lock mode. That is, it waits until the data can be read.
-
-        Otherwise it will return None, after the time set in the socket_timeout.
-
-        It processes such messages:
-        - response to PING
-        - messages from subscribed topics that are processed by functions set by the set_callback method.
-        - reply from the server that he received a QoS=1 message or subscribed to a topic
-        """
         if self.sock:
             try:
                 res = self.sock.read(1)
@@ -528,13 +363,6 @@ class MQTTClient:
             raise MQTTException(-1)
 
     def wait_msg(self):
-        """
-        This method waits for a message from the server.
-
-        Compatibility with previous versions.
-
-        It is recommended not to use this method. Set socket_time=None instead.
-        """
         st_old = self.socket_timeout
         self.socket_timeout = None
         out = self.check_msg()
