@@ -3,7 +3,7 @@
   "meta_version": 1,
 
   "targets": {
-    "core/RP2350/src":                                  {"rev": 26},
+    "core/RP2350/src":                                  {"rev": 27},
     "core/EFR32MG/src":                                 {"rev": 22},
             
     "device/ticle/src":                                 {"rev": 26, "requires_core": "RP2350"},
@@ -13,16 +13,16 @@
   "items": {            
     "core/EFR32MG/src/utools.py":                       {"ver": 1},
             
-    "device/xnode/src/__init__.py":                     {"ver":1},
-    "device/xnode/src/autoctrl.py":                     {"ver":1},
-    "device/xnode/src/ext.py":                          {"ver":1},
+    "device/xnode/src/__init__.py":                     {"ver": 1},
+    "device/xnode/src/autoctrl.py":                     {"ver": 1},
+    "device/xnode/src/ext.py":                          {"ver": 1},
               
     "core/RP2350/src/umqtt":                            {"ver": 1},
     "core/RP2350/src/umqtt/robust2.py":                 {"ver": 1},
     "core/RP2350/src/umqtt/simple2.py":                 {"ver": 1},
     "core/RP2350/src/ublynk.py":                        {"ver": 1},
     "core/RP2350/src/ufilter.py":                       {"ver": 1},
-    "core/RP2350/src/utools.py":                        {"ver": 21,
+    "core/RP2350/src/utools.py":                        {"ver": 2},
             
     "device/ticle/src/ext":                             {"ver": 1},
     "device/ticle/src/pbl":                             {"ver": 1},
@@ -49,3 +49,4 @@
     "device/ticle/src/pbl/ws2812matrix_effect.py":      {"ver": 1}
   }
 }
+
