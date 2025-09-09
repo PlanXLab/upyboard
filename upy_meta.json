@@ -3,7 +3,7 @@
   "meta_version": 1,
 
   "targets": {
-    "core/RP2350/src":                                  {"rev": 26},
+    "core/RP2350/src":                                  {"rev": 27},
     "core/EFR32MG/src":                                 {"rev": 22},
             
     "device/ticle/src":                                 {"rev": 26, "requires_core": "RP2350"},
@@ -21,7 +21,7 @@
     "core/RP2350/src/umqtt/robust2.py":                 {"ver": 1},
     "core/RP2350/src/umqtt/simple2.py":                 {"ver": 1},
     "core/RP2350/src/ublynk.py":                        {"ver": 1},
-    "core/RP2350/src/ufilter.py":                       {"ver": 2},
+    "core/RP2350/src/ufilter.py":                       {"ver": 1},
     "core/RP2350/src/utools.py":                        {"ver": 1},
             
     "device/ticle/src/ext":                             {"ver": 1},
@@ -50,3 +50,4 @@
   }
 
 }
+
