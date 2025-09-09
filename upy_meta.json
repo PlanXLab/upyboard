@@ -21,7 +21,7 @@
     "core/RP2350/src/umqtt/robust2.py":                 {"ver": 1},
     "core/RP2350/src/umqtt/simple2.py":                 {"ver": 1},
     "core/RP2350/src/ublynk.py":                        {"ver": 1},
-    "core/RP2350/src/ufilter.py":                       {"ver": 1},
+    "core/RP2350/src/ufilter.py":                       {"ver": 2},
     "core/RP2350/src/utools.py":                        {"ver": 1},
             
     "device/ticle/src/ext":                             {"ver": 1},
@@ -48,4 +48,5 @@
     "device/ticle/src/pbl/ultrasonic_grid.py":          {"ver": 1},
     "device/ticle/src/pbl/ws2812matrix_effect.py":      {"ver": 1}
   }
+
 }
