@@ -6,7 +6,7 @@
     "core/RP2350/src":                                  {"rev": 27},
     "core/EFR32MG/src":                                 {"rev": 22},
             
-    "device/ticle/src":                                 {"rev": 26, "requires_core": "RP2350"},
+    "device/ticle/src":                                 {"rev": 27, "requires_core": "RP2350"},
     "device/xnode/src":                                 {"rev": 22, "requires_core": "EFR32MG"}
   },            
             
@@ -50,5 +50,6 @@
   }
 
 }
+
 
 
