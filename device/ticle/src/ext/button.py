@@ -1,3 +1,6 @@
+__version__ = "1.0.0"
+__author__ = "PlanX Lab Development Team"
+
 from . import (
     utime,
     machine, micropython,
@@ -491,4 +494,5 @@ class Button:
         @on_released.setter
         def on_released(self, callback: callable):
             Button._set_on_released_all(self._parent, callback, self._indices)
+
 
