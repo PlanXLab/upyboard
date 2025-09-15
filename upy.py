@@ -1,7 +1,11 @@
 import os 
+import io
 import sys
 import time
 import re
+import tempfile
+import tarfile
+import base64
 import platform
 import threading
 import posixpath
@@ -16,6 +20,7 @@ import pathlib
 from typing import Callable, Optional, Tuple
 import click
 
+import mpy_cross
 import serial
 from serial.tools import list_ports
 from genlib.ansiec import ANSIEC
@@ -32,6 +37,8 @@ _expected_bytes = 0
 _error_header       = b"Traceback (most recent call last):"
 _error_header_buf   = b""
 _skip_error_output  = False
+
+#-------------------------------------------------------------
 
 def stdout_write_bytes(b):
     global _buffer, _expected_bytes
@@ -162,9 +169,6 @@ else:
             _raw(False)
 
 if IS_WINDOWS:
-    import msvcrt
-    from typing import Callable
-
     _PUTB: Callable[[bytes], None] = msvcrt.putch 
     _PUTW: Callable[[str], None]   = msvcrt.putwch 
     
@@ -219,7 +223,7 @@ class UpyBoard:
     _OK_RESPONSE = b'OK'
     _DEIVCE_CHUNK_SIZES = 4096
     
-    def __init__(self, port:str, baudrate:int=115200):
+    def __init__(self, port:str, baudrate:int=115200, core="RP2350", device_root_fs="/"):
         """
         Initialize the UpyBoard instance with the specified serial port and baud rate.
         :param port: The serial port to connect to.
@@ -235,7 +239,10 @@ class UpyBoard:
             raise UpyBoardError(f"failed to open {port} ({e})")
         except (OSError, IOError): 
             raise UpyBoardError(f"failed to open {port} (device not found)")
-    
+        
+        self.core = core
+        self.device_root_fs = device_root_fs
+        
         self.__init_repl()
 
     def __init_repl(self):
@@ -372,7 +379,7 @@ class UpyBoard:
                             time.sleep(0.01)
                         
                         time.sleep(0.1)
-                        if _core != "EFR32MG":
+                        if self.core != "EFR32MG":
                             self.serial.write(self._CTRL_D)  # soft reset
                             time.sleep(0.1)
                         
@@ -396,6 +403,10 @@ class UpyBoard:
         :param echo: If True, echo the command to stdout.
         :return: The output of the command as bytes.
         """
+        global _skip_error_output
+        
+        _skip_error_output = False
+    
         if isinstance(command, str):
             command = command.encode('utf-8')
         
@@ -472,6 +483,7 @@ class UpyBoard:
             data_err = data_err[:-1]
             
         finally:
+            _skip_error_output = False
             if stream_output and follow_thread and follow_thread.is_alive():
                 self.__stop_event.set()
                 try:
@@ -547,7 +559,7 @@ class UpyBoard:
             if serial != None:
                 serial.close()
 
-    def __fs_ls_fallback(self, dir:str="/") -> list[Tuple[str, int, bool]]:
+    def __fs_ls_fallback(self, dir:str="/") -> list[list[...]]:
         """
         Fallback method for listing directory contents (original implementation).
         """
@@ -683,7 +695,7 @@ class UpyBoard:
         bar_length = 40 
 
         if local_file:
-            print(f"{ANSIEC.FG.BRIGHT_BLUE}{remote.replace(_device_root_fs, '', 1)}{ANSIEC.OP.RESET}")
+            print(f"{ANSIEC.FG.BRIGHT_BLUE}{remote.replace(self.device_root_fs, '', 1)}{ANSIEC.OP.RESET}")
 
         try:
             file_size = self.fs_state(remote)
@@ -741,7 +753,7 @@ class UpyBoard:
         """
         Return file size of given path.
         """
-        if _core == "EFR32MG":
+        if self.core == "EFR32MG":
             command = f"""
                 try:
                     with open('{path}', 'rb') as f:
@@ -923,7 +935,7 @@ class UpyBoard:
 
         try:    
             f = open(local, "rb")
-            print(f"{ANSIEC.FG.BRIGHT_BLUE}{remote.replace(_device_root_fs, '', 1)}{ANSIEC.OP.RESET}")
+            print(f"{ANSIEC.FG.BRIGHT_BLUE}{remote.replace(self.device_root_fs, '', 1)}{ANSIEC.OP.RESET}")
 
             while True:
                 chunk = f.read(self._DEIVCE_CHUNK_SIZES)
@@ -960,21 +972,41 @@ class UpyBoard:
         Remove a directory and all its contents recursively.
         :param dir: The directory to remove.
         """
-        command = f"""
-            import os
-            def rmdir(dir):
-                os.chdir(dir)
-                for f in os.listdir():
-                    try:
-                        os.remove(f)
-                    except OSError:
-                        pass
-                for f in os.listdir():
-                    rmdir(f)
-                os.chdir('..')
-                os.rmdir(dir)
-            rmdir('{dir}')
-        """
+        if self.core == "EFR32MG":
+            command = f"""
+                import os
+                def rmdir(dir):
+                    os.chdir(dir)
+                    for f in os.listdir():
+                        try:
+                            os.remove(f)
+                        except OSError:
+                            pass
+                    for f in os.listdir():
+                        rmdir(f)
+                    os.chdir('..')
+                    os.rmdir(dir)
+                rmdir('{dir}')
+            """
+        else:
+            command = f"""
+                import os
+                def rmdir(p):
+                    for name in os.listdir(p):
+                        fp = p + '/' + name if p != '/' else '/' + name
+                        try:
+                            if os.stat(fp)[0] & 0x4000:  # 디렉터리
+                                rmdir(fp)
+                            else:
+                                os.remove(fp)
+                        except OSError:
+                            try:
+                                rmdir(fp)
+                            except:
+                                pass
+                    os.rmdir(p)
+                rmdir('{dir}')
+            """
         self.exec(command)
 
     def fs_format(self) -> bool:
@@ -982,12 +1014,12 @@ class UpyBoard:
         Format the filesystem of the connected device based on its core type.
         :return: True if the filesystem was successfully formatted, False otherwise.
         """
-        if _core == "ESP32":
+        if self.core == "ESP32":
             command = """ 
                 import os
                 os.fsformat('/flash')
             """
-        elif _core in ("ESP32S3", "ESP32C6"):
+        elif self.core in ("ESP32S3", "ESP32C6"):
             command = """
                 import os
                 from flashbdev import bdev
@@ -995,17 +1027,17 @@ class UpyBoard:
                 os.VfsLfs2.mkfs(bdev)
                 os.mount(bdev, '/')
             """
-        elif _core == "EFR32MG":
+        elif self.core == "EFR32MG":
             command = """
                 import os
                 os.format()
             """
-        elif _core == "RP2350":
+        elif self.core == "RP2350":
             command = """
-                import os
-                import rp2
+                import os, rp2
                 bdev = rp2.Flash()
                 os.VfsFat.mkfs(bdev)
+                os.mount(bdev, '/')
             """
         else:
             return False
@@ -1287,7 +1319,7 @@ def cli(ctx, sport, baud, command):
         _device_path = os.path.join(os.path.dirname(upyboard.__file__), os.path.join("device", _device))  
         
     try:
-        _upy = UpyBoard(_sport, baud)
+        _upy = UpyBoard(port=_sport, baudrate=baud, core=_core, device_root_fs=_device_root_fs)
     except UpyBoardError:
         print(f"Device is not connected to {ANSIEC.FG.BRIGHT_RED}{_sport}{ANSIEC.OP.RESET}")
         print(f"Please check the port with the scan command and try again.")
@@ -1834,130 +1866,488 @@ def env(device=None):
 
     print(f"Serial port {ANSIEC.FG.BRIGHT_GREEN}{_sport}{ANSIEC.OP.RESET} is registered.") 
 
-import mpy_cross
+
+#------------------------------------------------------------------------------------------
+
+HOME_LIB_DIR = os.path.join(os.path.expanduser("~"), ".upy_lib")
+GH_DEFAULT_REF = "main"
 
 @cli.command()
-@click.argument("local", type=click.Path(exists=True))
+@click.argument("local", type=click.Path(exists=False))
 @click.argument("remote", required=False)
-def upload(local, remote):
+@click.option("--owner", default="PlanXLab", show_default=True)
+@click.option("--repo",  default="upyboard",  show_default=True)
+@click.option("--ref",   default=GH_DEFAULT_REF, show_default=True)
+def upload(local, remote, owner, repo, ref):
     """
-    It compiles all source code from the local path into .mpy files and uploads them to the remote path.
-    :param local: The local source code directory.
-    :param remote: The remote path on the device. If not provided, root directory will be used.
+    - gh abbreviated specs:
+        gh:core/<sub>      -> core/<_core>/src/<sub>
+        gh:device/<sub>    -> device/<_device>/src/<sub>
+    - gh full specs (optional):
+        gh:OWNER/REPO@REF/core/<ARCH>/src/<sub>
+        https://github.com/OWNER/REPO/(tree|blob)/REF/device/<BOARD>/src/<sub>
     """
+    META_NAME = "upy_meta.json"
+
+    def _gh_headers():
+        hdrs = {"User-Agent": "upyboard"}
+        tok = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+        if tok:
+            hdrs["Authorization"] = f"Bearer {tok}"
+        return hdrs
+
+    def _is_gh_spec(s: str) -> bool:
+        return isinstance(s, str) and s.startswith(("gh:", "gh://", "github:", "https://github.com/"))
+
+    def _resolve_gh_shorthand(s: str):
+        if not s.startswith("gh:"):
+            return None, None
+        body = s[3:]
+        if body.startswith("core/"):   return "core", body[5:]
+        if body.startswith("device/"): return "device", body[7:]
+        return None, None
+
+    def _parse_gh_full_spec(s: str):
+        s = s.strip()
+        if s.startswith("https://github.com/"):
+            m = re.match(r"^https://github\.com/([^/]+)/([^/]+)/(tree|blob)/([^/]+)/(.*)$", s)
+            if not m: raise click.ClickException(f"Unsupported GitHub URL: {s}")
+            return m.group(1), m.group(2), m.group(4), m.group(5)
+        if s.startswith("gh://"):     core = s[5:]
+        elif s.startswith("github:"): core = s[7:]
+        elif s.startswith("gh:"):     core = s[3:]
+        else: raise click.ClickException(f"Not a GitHub spec: {s}")
+        m = re.match(r"^([^/]+)/([^/@]+)(?:@([^/]+))?/(.+)$", core)
+        if not m: raise click.ClickException(f"Invalid GitHub spec: {s}")
+        return m.group(1), m.group(2), (m.group(3) or ref), m.group(4)
+
+    def _load_remote_meta(owner, repo, ref_):
+        url = f"https://api.github.com/repos/{owner}/{repo}/contents/{META_NAME}?ref={ref_}"
+        req = urllib.request.Request(url, headers=_gh_headers())
+        with urllib.request.urlopen(req) as r:
+            data = json.load(r)
+        b64 = (data.get("content") or "").replace("\n", "")
+        if not b64:
+            raise click.ClickException("Remote meta has no content field.")
+        txt = base64.b64decode(b64.encode("utf-8")).decode("utf-8")
+        return json.loads(txt)
+
+    def _load_local_meta():
+        base_dir = os.path.dirname(upyboard.__file__)
+        path = os.path.join(base_dir, META_NAME)
+        if not os.path.exists(path): return {"targets": {}, "items": {}}
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    def _target_root_for(scope: str, *, core: str, device: str, meta: dict | None, honor_requires=True, ignore_device_if_same=True):
+        scope = (scope or "").lower().strip()
+
+        def _root_of(s):
+            if s == "core":
+                return f"core/{core}/src"
+            if s == "device":
+                if ignore_device_if_same and (device == core):
+                    return None
+                return f"device/{device}/src"
+            return None
+
+        def _requires_ok(root: str) -> bool:
+            if not (meta and honor_requires and root):
+                return True
+            t = meta.get("targets", {}).get(root, {})
+            req = t.get("requires_core")
+            return (req is None) or (str(req) == str(core))
+
+        def _exists_in_meta(root: str) -> bool:
+            if not (meta and root):
+                return True
+            return root in meta.get("targets", {})
+
+        if scope in ("core", "device"):
+            root = _root_of(scope)
+            if not root: return (None, None)
+            if not _exists_in_meta(root): return (None, None)
+            if not _requires_ok(root):    return (None, None)
+            return (root, scope)
+        return (None, None)
+
+    def _download_raw_file(owner, repo, ref_, path, out_path):
+        url = f"https://raw.githubusercontent.com/{owner}/{repo}/{ref_}/{path}"
+        req = urllib.request.Request(url, headers=_gh_headers())
+        with urllib.request.urlopen(req) as r, open(out_path, "wb") as f:
+            f.write(r.read())
+        return out_path
+
+    def _download_tar(owner, repo, ref_):
+        url = f"https://api.github.com/repos/{owner}/{repo}/tarball/{ref_}"
+        req = urllib.request.Request(url, headers=_gh_headers())
+        with urllib.request.urlopen(req) as r:
+            return r.read()
+
+    def _safe_join(root, *parts):
+        p = os.path.join(root, *parts)
+        rp = os.path.realpath(p)
+        rr = os.path.realpath(root)
+        if not rp.startswith(rr):
+            raise RuntimeError("Unsafe path in tar")
+        return rp
+
+    def _extract_tar_subdir(tar_bytes, subdir, out_dir):
+        os.makedirs(out_dir, exist_ok=True)
+        with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:*") as tf:
+            top = None
+            for m in tf.getmembers():
+                if m.name and "/" in m.name:
+                    top = m.name.split("/", 1)[0] + "/"; break
+            if not top: raise click.ClickException("Malformed tarball")
+            prefix = top + subdir.strip("/") + "/"
+            dst_root = os.path.join(out_dir, os.path.basename(subdir.strip("/")) or "repo")
+            os.makedirs(dst_root, exist_ok=True)
+            found = False
+            for m in tf.getmembers():
+                if not m.name.startswith(prefix): continue
+                rel = m.name[len(prefix):]
+                if rel == "": found = True; continue
+                if not (m.isdir() or m.isreg() or getattr(m, "isfile", lambda: False)()):
+                    continue
+                found = True
+                safe_rel = rel.replace("\\", "/")
+                if m.isdir():
+                    os.makedirs(_safe_join(dst_root, safe_rel), exist_ok=True); continue
+                dst_path = _safe_join(dst_root, safe_rel)
+                os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+                src_f = tf.extractfile(m)
+                if src_f is None: continue
+                with src_f, open(dst_path, "wb") as dst: shutil.copyfileobj(src_f, dst)
+                try: os.utime(dst_path, (m.mtime, m.mtime))
+                except Exception: pass
+        if not found: raise click.ClickException(f"Path '{subdir}' not found in tarball")
+        for root_, ds, fs in os.walk(dst_root):
+            for nm in list(ds) + list(fs):
+                p = os.path.join(root_, nm)
+                try:
+                    if os.path.islink(p): os.unlink(p)
+                except Exception: pass
+        return dst_root
+
+    def _ensure_remote_dir(remote_dir):
+        if not remote_dir: return
+        parts = [p for p in remote_dir.replace("\\", "/").strip("/").split("/") if p]
+        path = _device_root_fs
+        for p in parts:
+            path = path + p + "/"
+            _upy.fs_mkdir(path)
+
     def _mpy_output_path(base, filepath):
         relative_path = os.path.relpath(filepath, base)
         output_dir = os.path.join(os.path.dirname(base), "mpy", os.path.dirname(relative_path))
         os.makedirs(output_dir, exist_ok=True)
-        
         filename = os.path.splitext(os.path.basename(filepath))[0] + ".mpy"
         return os.path.join(output_dir, filename)
 
-    def _conv_py_to_mpy(local, base):
+    def _conv_py_to_mpy(local_path, base):
         args = ['_filepath_', '-o', '_outpath_', '-msmall-int-bits=31']
         if _core == "EFR32MG":
-            if _version < 1.19:
-                args.append('-mno-unicode')
-        elif _core == "ESP32":
-            args.append('-march=xtensa')
-        elif _core == "ESP32S3":
-            args.append('-march=xtensawin')
-        elif _core == "RP2350":
-            args.append('-march=armv7emsp')
+            if _version < 1.19: args.append('-mno-unicode')
+        elif _core == "ESP32":   args.append('-march=xtensa')
+        elif _core == "ESP32S3": args.append('-march=xtensawin')
+        elif _core == "RP2350":  args.append('-march=armv7emsp')
         else:
             raise ValueError(f"The {ANSIEC.FG.BRIGHT_RED}{_core}{ANSIEC.OP.RESET} is not supported")
-        
-        if os.path.isfile(local):
-            args[0] = local
-            args[2] = os.path.splitext(local)[0] + ".mpy"    
+
+        if os.path.isfile(local_path):
+            args[0] = local_path
+            args[2] = os.path.splitext(local_path)[0] + ".mpy"
             mpy_cross.run(*args)
-        else:      
-            for filename in os.listdir(local):
-                filepath = os.path.join(local, filename)
-
-                if os.path.isdir(filepath):
-                    _conv_py_to_mpy(filepath, base)
-                    continue
-
-                if not filepath.endswith(".py"):
-                    continue
-    
-                args[0] = filepath
-                args[2] = _mpy_output_path(base, filepath)
+        else:
+            for fn in os.listdir(local_path):
+                fp = os.path.join(local_path, fn)
+                if os.path.isdir(fp):
+                    _conv_py_to_mpy(fp, base); continue
+                if not fp.endswith(".py"): continue
+                args[0] = fp; args[2] = _mpy_output_path(base, fp)
                 mpy_cross.run(*args)
 
+    def _cache_marker_for_file(cache_file):
+        d, b = os.path.dirname(cache_file), os.path.basename(cache_file)
+        return os.path.join(d, f".{b}.upy.json")
 
-    remote = _device_root_fs + (remote or "")
-        
-    _conv_py_to_mpy(local, base=local)
-            
-    if os.path.isfile(local):
-        local = os.path.splitext(local)[0] + ".mpy"
-        click.Context(put).invoke(put, local=local, remote=remote)
-        os.remove(local)
-    elif os.path.isdir(local):            
-        shutil.rmtree(os.path.join(local, "__pycache__"), ignore_errors=True)
+    def _read_json(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f: return json.load(f)
+        except Exception:
+            return {}
 
-        local_mpy_dir = os.path.join(os.path.dirname(local), "mpy")
-        if not os.path.exists(local_mpy_dir):
-            return
+    def _write_json(path, data):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f: json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)
 
-        _upy.fs_mkdir(remote)
+    def _iter_items(prefix, meta_items):
+        pref = prefix if prefix.endswith(".py") else prefix.rstrip("/") + "/"
+        for k in meta_items.keys():
+            if k == prefix or k.startswith(pref):
+                if k.endswith(".py"):
+                    yield k
 
-        for item in os.listdir(local_mpy_dir):
-            local_item = os.path.join(local_mpy_dir, item)
-            remote_item = os.path.join(remote, item).replace("\\", "/")
-            click.Context(put).invoke(put, local=local_item, remote=remote_item)
-
-        shutil.rmtree(local_mpy_dir, onerror=__force_remove_readonly)
-    else:
-        print("The local path is not a file or directory.")
+    def _meta_path_exists(meta: dict, prefix: str) -> bool:
+        items = meta.get("items", {})
+        if prefix in items:
+            return True
+        pref = prefix.rstrip("/") + "/"
+        return any(k.startswith(pref) for k in items)
 
 
-def find_core_by_device(device: str) -> str | None:
-    for core, platform_map in SUPPORT_CORE_DEVICE_TYPES.items():
-        if device in platform_map.values():
-            return core
-    return None
+    if not _is_gh_spec(local):
+        if remote is None:
+            if os.path.isdir(local):
+                remote = f"lib/{os.path.basename(os.path.abspath(local))}/"
+            else:
+                remote = "lib/"
+        remote = _device_root_fs + (remote or "")
+        _conv_py_to_mpy(local, base=local)
+        if os.path.isfile(local):
+            local_mpy = os.path.splitext(local)[0] + ".mpy"
+            click.Context(put).invoke(put, local=local_mpy, remote=remote)
+            try: os.remove(local_mpy)
+            except Exception: pass
+        elif os.path.isdir(local):
+            shutil.rmtree(os.path.join(local, "__pycache__"), ignore_errors=True)
+            local_mpy_dir = os.path.join(os.path.dirname(local), "mpy")
+            if not os.path.exists(local_mpy_dir):
+                print("Nothing to upload (no .mpy generated)."); return
+            _upy.fs_mkdir(remote)
+            for item in os.listdir(local_mpy_dir):
+                local_item = os.path.join(local_mpy_dir, item)
+                remote_item = os.path.join(remote, item).replace("\\", "/")
+                click.Context(put).invoke(put, local=local_item, remote=remote_item)
+            shutil.rmtree(local_mpy_dir, ignore_errors=True)
+        else:
+            print("The local path is not a file or directory.")
+        return
+
+    scope, rest = _resolve_gh_shorthand(local)
+    gh_owner, gh_repo, gh_ref = owner, repo, ref
+    if scope is None:
+        gh_owner, gh_repo, gh_ref, sub_from_full = _parse_gh_full_spec(local)
+        if   sub_from_full.startswith("core/"):
+            scope = "core";   parts = sub_from_full.split("/", 3); rest = parts[3] if (len(parts)>=4 and parts[2]=="src") else ""
+        elif sub_from_full.startswith("device/"):
+            scope = "device"; parts = sub_from_full.split("/", 3); rest = parts[3] if (len(parts)>=4 and parts[2]=="src") else ""
+        else:
+            raise click.ClickException("Unsupported GH sub path (need core/*/src or device/*/src).")
+
+    remote_meta = _load_remote_meta(gh_owner, gh_repo, gh_ref)
+    root, chosen_scope = _target_root_for(scope, core=_core, device=_device, meta=remote_meta, honor_requires=True, ignore_device_if_same=True)
+    if not root:
+        print(f"Nothing to do for scope={scope} (core={_core}, device={_device}).")
+        return
+
+    local_meta  = _load_local_meta()
+
+    full = f"{root}/{rest}".rstrip("/")
+    if not _meta_path_exists(remote_meta, full):
+        print("It doesn't exist.")
+        return
+
+    is_file = full.endswith(".py")
+    remote_items = remote_meta.get("items", {})
+    local_items  = local_meta.get("items",  {})
+
+    targets = [full] if is_file else list(_iter_items(full, remote_items))
+    if not targets:
+        print("No .py items to process.")
+        return
+
+    selected, to_download = [], []
+    for p in targets:
+        r_ver = int(remote_items.get(p, {}).get("ver", 0))
+        l_ver = int(local_items.get(p,  {}).get("ver", 0))
+        if r_ver <= l_ver:
+            continue
+        rel = p[len(root)+1:]
+        cache_py = os.path.join(HOME_LIB_DIR, p)
+        cache_mk = _cache_marker_for_file(cache_py)
+        cache_info = _read_json(cache_mk)
+        need_dl = (
+            (not os.path.isfile(cache_py)) or
+            (cache_info.get("ver") != r_ver) or (cache_info.get("ref") != gh_ref)
+        )
+        if need_dl:
+            to_download.append((p, rel, r_ver))
+        selected.append((cache_py, rel, r_ver))
+
+    if not selected:
+        print("It's already up to date.")
+        return
+
+    staging_dir = None
+    try:
+        MANY = 5
+        if len(to_download) > MANY:
+            base_prefix = os.path.dirname(full) if is_file else full
+            tar = _download_tar(gh_owner, gh_repo, gh_ref)
+            staging_dir = tempfile.mkdtemp(prefix="upy_gh_")
+            extracted = _extract_tar_subdir(tar, base_prefix, staging_dir)
+            for (p, rel, v) in to_download:
+                src = os.path.join(extracted, rel)
+                dst = os.path.join(HOME_LIB_DIR, p)
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                if os.path.exists(src):
+                    shutil.copy2(src, dst)
+                else:
+                    _download_raw_file(gh_owner, gh_repo, gh_ref, p, dst)
+                _write_json(_cache_marker_for_file(dst), {"ver": v, "ref": gh_ref, "path": p})
+        else:
+            for (p, rel, v) in to_download:
+                dst = os.path.join(HOME_LIB_DIR, p)
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                _download_raw_file(gh_owner, gh_repo, gh_ref, p, dst)
+                _write_json(_cache_marker_for_file(dst), {"ver": v, "ref": gh_ref, "path": p})
+
+        for (cache_py, rel, v) in selected:
+            if chosen_scope == "core":
+                remote_dir = "lib/" + (os.path.dirname(rel) + "/" if os.path.dirname(rel) else "")
+            else:
+                remote_dir = f"lib/{_device}/" + (os.path.dirname(rel) + "/" if os.path.dirname(rel) else "")
+            _ensure_remote_dir(remote_dir)
+
+            _conv_py_to_mpy(cache_py, base=cache_py)
+            local_mpy = os.path.splitext(cache_py)[0] + ".mpy"
+            remote_path = (_device_root_fs + remote_dir + os.path.splitext(os.path.basename(rel))[0] + ".mpy").replace("//","/")
+            click.Context(put).invoke(put, local=local_mpy, remote=remote_path)
+            try: os.remove(local_mpy)
+            except Exception: pass
+
+        print("The job is done!")
+    finally:
+        if staging_dir and os.path.isdir(staging_dir):
+            try: shutil.rmtree(staging_dir, ignore_errors=True)
+            except Exception: pass
+
 
 @cli.command()
-@click.argument("target", required=False, nargs=-1)
-def init(target=None):
-    """
-    Initialize the file system of the device.
-    """
-    global _core, _core_path, _device, _device_path
+@click.argument("lib_name", required=False)
+@click.option("--owner", default="PlanXLab", show_default=True, help="GitHub owner")
+@click.option("--repo",  default="upyboard",    show_default=True, help="GitHub repository")
+@click.option("--ref",   default=GH_DEFAULT_REF, show_default=True, help="Branch/Tag/SHA")
+@click.option("--all", "show_all", is_flag=True, hidden=True)
+def search(lib_name, owner, repo, ref, show_all):
+    import json, urllib.request, os
 
+    def _gh_headers():
+        hdrs = {"User-Agent": "upyboard"}
+        token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+        if token:
+            hdrs["Authorization"] = f"Bearer {token}"
+        return hdrs
+
+    def _fetch_tree(owner, repo, ref_):
+        url = f"https://api.github.com/repos/{owner}/{repo}/git/trees/{ref_}?recursive=1"
+        req = urllib.request.Request(url, headers=_gh_headers())
+        with urllib.request.urlopen(req) as r:
+            return json.load(r)
+
+    tried, last = [], None
+    for r in [ref, "main", "master"]:
+        if r in tried: continue
+        tried.append(r)
+        try:
+            data = _fetch_tree(owner, repo, r)
+            used_ref = r
+            break
+        except Exception as e:
+            last = e
+    else:
+        raise click.ClickException(f"GitHub tree fetch failed: {last}")
+
+    rows = []
+    for node in data.get("tree", []):
+        if node.get("type") != "blob": continue
+        path = node.get("path", "")
+        if not path.endswith(".py"): continue
+
+        if path.startswith("core/"):
+            parts = path.split("/", 3)  # core/<ARCH>/src/<rest>
+            if len(parts) < 4 or parts[2] != "src": continue
+            arch = parts[1]; rest = parts[3]
+            if not show_all and arch != _core:  # 내 보드만
+                continue
+            scope, target = "core", arch
+            shown_path = f"core/{arch}/{rest}"  # src 생략
+        elif path.startswith("device/"):
+            parts = path.split("/", 3)  # device/<BOARD>/src/<rest>
+            if len(parts) < 4 or parts[2] != "src": continue
+            board = parts[1]; rest = parts[3]
+            if not show_all and board != _device:  # 내 디바이스만
+                continue
+            scope, target = "device", board
+            shown_path = f"device/{board}/{rest}"  # src 생략
+        else:
+            continue
+
+        if lib_name and (lib_name.lower() not in path.lower()):
+            continue
+
+        rows.append((scope, target, shown_path))
+
+    if not rows:
+        print(f"[owner={owner} repo={repo} ref={used_ref}] No results.")
+        return
+
+    w1 = max(5, max(len(r[0]) for r in rows))
+    w2 = max(6, max(len(r[1]) for r in rows))
+    print(f"[owner={owner} repo={repo} ref={used_ref}]")
+    print(f"{'SCOPE'.ljust(w1)}  {'TARGET'.ljust(w2)}  PATH")
+    print("-" * 80)
+    for scope, target, shown_path in rows:
+        print(f"{scope.ljust(w1)}  {target.ljust(w2)}  {shown_path}")
+
+
+@cli.command(context_settings=dict(ignore_unknown_options=True, allow_interspersed_args=False))
+@click.argument("target", required=False, nargs=-1)
+def init(target=()):
     base_dir = os.path.dirname(upyboard.__file__)
-    
+    upload_format_str = (
+        "Uploading the "
+        + ANSIEC.FG.BRIGHT_YELLOW + "{0}" + ANSIEC.OP.RESET
+        + " library on the "
+        + ANSIEC.FG.BRIGHT_YELLOW + "{1}" + ANSIEC.OP.RESET
+    )
+
+    def _sanitize_wrapped_run(parts):
+        if parts and parts[0] == "run":
+            if len(parts) >= 2 and parts[1].endswith(".py"):
+                parts = parts[1:]
+        return parts
+
     def _normalize_target(parts):
-        if not parts:
-            return None
+        if not parts: return None
         return "/".join(p.strip("/") for p in parts if p) or None
 
     def _parse_target(t):
-        if not t:
-            return (None, "both", None)
-
+        if not t: return (None, "both", None)
         parts = t.strip("/").split("/")
         if len(parts) == 1:
             if parts[0] in ("core", "device"):
                 return (None, parts[0], None)
-            return (parts[0], "both", None)  # upy init ticle
-
+            return (parts[0], "both", None)
         first, second = parts[0], parts[1]
-
         if first in ("core", "device"):
             sub = "/".join(parts[1:]) or None
             return (None, first, sub)
-
         if second in ("core", "device"):
             sub = "/".join(parts[2:]) or None
             return (first, second, sub)
-
         sub = "/".join(parts[1:]) or None
         return (first, "auto", sub)
 
+    def _find_core_by_device(device):
+        for core, platform_map in SUPPORT_CORE_DEVICE_TYPES.items():
+            if device in platform_map.values():
+                return core
+        return None
 
     def _resolve_board(board_name):
         global _core, _core_path, _device, _device_path
@@ -1967,47 +2357,25 @@ def init(target=None):
             if _device and not _device_path:
                 _device_path = os.path.join(base_dir, "device", _device)
             return
-
-        core = find_core_by_device(board_name)
+        core = _find_core_by_device(board_name)
         if core is None:
             print(f"The {ANSIEC.FG.BRIGHT_RED}{board_name}{ANSIEC.OP.RESET} is an unsupported device.")
             raise click.Abort()
-
         _core = core
         _device = board_name
         _core_path = os.path.join(base_dir, "core", _core)
         _device_path = os.path.join(base_dir, "device", _device)
 
-    def _ensure_dirs_for_scope(scope):
-        _upy.fs_mkdir(_device_root_fs + "lib/")
-        if scope in ("device", "both"):
-            _upy.fs_mkdir(_device_root_fs + f"lib/{_device}/")
+    def _do_format_if_needed(scope, subpath):
+        do_format = (scope == "both" and subpath is None)
+        if do_format:
+            if not click.Context(format).invoke(format):
+                print("Unable to format the file system. Please check the "
+                      + ANSIEC.FG.BRIGHT_RED + f"{_device}" + ANSIEC.OP.RESET)
+                return False
+        return True
 
-    def _upload_core(sub=None):
-        src_base = os.path.join(_core_path, "src")
-        src = os.path.join(src_base, sub) if sub else src_base
-
-        if not os.path.exists(src):
-            print(f"The {ANSIEC.FG.BRIGHT_RED}{sub or 'core'}{ANSIEC.OP.RESET} is not found in core/src.")
-            raise click.Abort()
-
-        print(upload_format_str.format("Core", _device))
-
-        if os.path.isdir(src):
-            rel = (sub.rstrip("/") + "/") if sub else ""
-            remote_dir = "lib/" + rel
-            _ensure_remote_dir(remote_dir)
-            click.Context(upload).invoke(upload, local=src, remote=remote_dir)
-        else:
-            rel = os.path.relpath(src, src_base).replace("\\", "/")
-            rel_dir = os.path.dirname(rel)
-            base_name_mpy = os.path.splitext(os.path.basename(rel))[0] + ".mpy"
-            remote_dir = "lib/" + (rel_dir + "/" if rel_dir else "")
-            remote_file = remote_dir + base_name_mpy
-            _ensure_remote_dir(remote_dir)
-            click.Context(upload).invoke(upload, local=src, remote=remote_file)
-
-    def _ensure_remote_dir(remote_dir):
+    def _ensure_remote_dir(remote_dir: str):
         if not remote_dir:
             return
         parts = [p for p in remote_dir.replace("\\", "/").strip("/").split("/") if p]
@@ -2015,77 +2383,113 @@ def init(target=None):
         for p in parts:
             path = path + p + "/"
             _upy.fs_mkdir(path)
-            
-    def _upload_device(sub=None):
-        src_base = os.path.join(_device_path, "src")
-        src = os.path.join(src_base, sub) if sub else src_base
 
-        if not os.path.exists(src):
-            print(f"The {ANSIEC.FG.BRIGHT_RED}{sub or 'device'}{ANSIEC.OP.RESET} is not found in device/src.")
-            raise click.Abort()
+    def _iter_py_files(root):
+        for dirpath, _, filenames in os.walk(root):
+            for fn in filenames:
+                if fn.endswith(".py"):
+                    full = os.path.join(dirpath, fn)
+                    rel = os.path.relpath(full, root).replace("\\", "/")
+                    yield rel, full
 
-        print(upload_format_str.format("Device", _device))
-
-        if os.path.isdir(src):
-            rel = (sub.rstrip("/") + "/") if sub else ""
-            remote_dir = f"lib/{_device}/" + rel
-            _ensure_remote_dir(remote_dir)
-            click.Context(upload).invoke(upload, local=src, remote=remote_dir)
+    def _upload_union(scope, sub=None):
+        if scope == "core":
+            cache_base = os.path.join(HOME_LIB_DIR, "core", _core, "src")
+            pkg_base   = os.path.join(_core_path, "src")
+            remote_root = "lib/"
+            title = "Core"
         else:
-            rel = os.path.relpath(src, src_base).replace("\\", "/")
-            rel_dir = os.path.dirname(rel)
-            base_name_mpy = os.path.splitext(os.path.basename(rel))[0] + ".mpy"
-            remote_dir = f"lib/{_device}/" + (rel_dir + "/" if rel_dir else "")
-            remote_file = remote_dir + base_name_mpy
-            _ensure_remote_dir(remote_dir)
-            click.Context(upload).invoke(upload, local=src, remote=remote_file)
+            cache_base = os.path.join(HOME_LIB_DIR, "device", _device, "src")
+            pkg_base   = os.path.join(_device_path, "src")
+            remote_root = f"lib/{_device}/"
+            title = "Device"
 
-    raw_target = _normalize_target(target)
-    board, scope, subpath = _parse_target(raw_target)
+        def _abs_pair(base):
+            if sub:
+                p = os.path.join(base, sub)
+                return (p, os.path.isdir(p), os.path.isfile(p))
+            else:
+                return (base, os.path.isdir(base), False)
+
+        cache_path, cache_is_dir, cache_is_file = _abs_pair(cache_base)
+        pkg_path,   pkg_is_dir,   pkg_is_file   = _abs_pair(pkg_base)
+
+        if cache_is_dir:
+            rel = (sub.rstrip("/") + "/") if sub else ""
+            remote_dir = (remote_root + rel).replace("//", "/")
+            print(upload_format_str.format(f"{title}(home)", _device))
+            _ensure_remote_dir(remote_dir)
+            click.Context(upload).invoke(upload, local=cache_path, remote=remote_dir)
+        elif cache_is_file:
+            rel = os.path.relpath(cache_path, cache_base).replace("\\", "/")
+            rel_dir = os.path.dirname(rel)
+            remote_dir = (remote_root + (rel_dir + "/" if rel_dir else "")).replace("//", "/")
+            remote_file = remote_dir + os.path.splitext(os.path.basename(rel))[0] + ".mpy"
+            print(upload_format_str.format(f"{title}(home:file)", _device))
+            _ensure_remote_dir(remote_dir)
+            click.Context(upload).invoke(upload, local=cache_path, remote=remote_file)
+
+        missing = []
+        if pkg_is_dir:
+            home_set = set()
+            if cache_is_dir and os.path.exists(cache_path):
+                for rel, _full in _iter_py_files(cache_path):
+                    home_set.add(rel)
+            for rel, full in _iter_py_files(pkg_path):
+                if rel in home_set:
+                    continue
+                missing.append((rel, full))
+        elif pkg_is_file:
+            if not cache_is_file:
+                rel = os.path.relpath(pkg_path, pkg_base).replace("\\", "/")
+                missing.append((rel, pkg_path))
+
+        if missing:
+            print(upload_format_str.format(f"{title}(package: {len(missing)})", _device))
+            for rel, full in missing:
+                rel_dir = os.path.dirname(rel)
+                remote_dir = (remote_root + (rel_dir + "/" if rel_dir else "")).replace("//", "/")
+                remote_file = remote_dir + os.path.splitext(os.path.basename(rel))[0] + ".mpy"
+                _ensure_remote_dir(remote_dir)
+                click.Context(upload).invoke(upload, local=full, remote=remote_file)
 
     if _version < 1.12:
         print("Unkown micropython version " + ANSIEC.FG.BRIGHT_RED + f"{_version}" + ANSIEC.OP.RESET)
         raise click.Abort()
 
+    parts = _sanitize_wrapped_run(list(target))
+    raw_target = _normalize_target(parts)
+    board, scope, subpath = _parse_target(raw_target)
     _resolve_board(board)
 
     if scope == "auto":
-        dev_path = os.path.join(_device_path, "src", subpath)
-        core_path = os.path.join(_core_path, "src", subpath)
-        if os.path.exists(dev_path):
+        dev_home = os.path.join(HOME_LIB_DIR, "device", _device, "src", subpath or "")
+        dev_pkg  = os.path.join(_device_path, "src",   subpath or "")
+        if os.path.exists(dev_home) or os.path.exists(dev_pkg):
             scope = "device"
-        elif os.path.exists(core_path):
-            scope = "core"
         else:
-            print(f"The {ANSIEC.FG.BRIGHT_RED}{subpath}{ANSIEC.OP.RESET} is not found in "
-                f"device/src or core/src for board '{_device}'.")
-            raise click.Abort()
-        
-    upload_format_str = (
-        "Uploading the "
-        + ANSIEC.FG.BRIGHT_YELLOW + "{0}" + ANSIEC.OP.RESET
-        + " library on the "
-        + ANSIEC.FG.BRIGHT_YELLOW + "{1}" + ANSIEC.OP.RESET
-    )
+            core_home = os.path.join(HOME_LIB_DIR, "core", _core, "src", subpath or "")
+            core_pkg  = os.path.join(_core_path,  "src", subpath or "")
+            if os.path.exists(core_home) or os.path.exists(core_pkg):
+                scope = "core"
+            else:
+                print(f"The {ANSIEC.FG.BRIGHT_RED}{subpath}{ANSIEC.OP.RESET} is not found for board '{_device}'.")
+                raise click.Abort()
 
-    do_format = (scope == "both" and subpath is None)
-    if do_format:
-        if not click.Context(format).invoke(format):
-            print("Unable to format the file system. Please check the "
-                  + ANSIEC.FG.BRIGHT_RED + f"{_device}" + ANSIEC.OP.RESET)
-            return
-        _ensure_dirs_for_scope("both")
-    else:
-        _ensure_dirs_for_scope(scope)
+    if not _do_format_if_needed(scope, subpath):
+        return
+
+    _ensure_remote_dir("lib/")
+    _ensure_remote_dir(f"lib/{_device}/")
 
     if scope == "both":
-        _upload_core(None)
+        _upload_union("core",   None)
         if _device_path and os.path.exists(os.path.join(_device_path, "src")):
-            _upload_device(None)
+            _upload_union("device", None)
     elif scope == "core":
-        _upload_core(subpath)
+        _upload_union("core",   subpath)
     elif scope == "device":
-        _upload_device(subpath)
+        _upload_union("device", subpath)
     else:
         print(f"The {ANSIEC.FG.BRIGHT_RED}{scope}{ANSIEC.OP.RESET} is not a valid scope.")
         raise click.Abort()
