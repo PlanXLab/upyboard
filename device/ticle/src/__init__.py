@@ -14,7 +14,7 @@ from utools import ANSIEC
 
 
 __version__ = "1.0.0"
-__author__ = "PlanXLab Development Team"
+__author__ = "PlanX Lab Development Team"
 
 
 try:
@@ -1262,3 +1262,4 @@ def input(prompt:str="") -> str:
 
 
     return ''.join(buf)
+
