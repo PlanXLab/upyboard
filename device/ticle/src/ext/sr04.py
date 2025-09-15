@@ -1,3 +1,6 @@
+__version__ = "1.0.0"
+__author__ = "PlanX Lab Development Team"
+
 from . import (
     utime, array,
     machine, micropython,
@@ -353,4 +356,5 @@ class SR04:
                     if not (callable(callback) or callback is None):
                         raise TypeError("Each callback must be callable or None")
                     self._parent._user_callbacks[i] = callback
+
 
