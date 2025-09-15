@@ -18,7 +18,7 @@ __author__ = "PlanX Lab Development Team"
 
 
 __all__ = (
-    "Button", "Relay", "ServoMotor", "SR04", "KY022", "HD44780_PCF8574", "VL53L0X", "BME680", "WS2812Matrix"
+    "Button", "Relay", "ServoMotor", "SR04", "KY022", "HD44780_PCF8574", "VL53L0X", "BME680", "WS2812Matrix", "MPU6050"
 )
 
 _lazy_map = {
@@ -31,6 +31,7 @@ _lazy_map = {
     "VL53L0X": (".vl53l0x", "VL53L0X"),
     "BME680": (".bme680", "BME680"),
     "WS2812Matrix": (".ws2812", "WS2812Matrix"),
+    "MPU6050": (".mpu6050", "MPU6050"),
 }
 
 def __getattr__(name):
@@ -50,3 +51,4 @@ def __getattr__(name):
 def __dir__():
 
     return sorted(list(globals().keys()) + list(_lazy_map.keys()))
+
