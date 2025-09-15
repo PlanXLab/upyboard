@@ -14,7 +14,7 @@ import ticle
 
 
 __version__ = "1.0.0"
-__author__ = "PlanXLab Development Team"
+__author__ = "PlanX Lab Development Team"
 
 
 __all__ = (
@@ -48,4 +48,5 @@ def __getattr__(name):
     return obj
 
 def __dir__():
+
     return sorted(list(globals().keys()) + list(_lazy_map.keys()))
