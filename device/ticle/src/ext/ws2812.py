@@ -1,3 +1,6 @@
+__version__ = "1.0.0"
+__author__ = "PlanX Lab Development Team"
+
 from . import (
     sys, math, utime, array,
     gc, machine, micropython, rp2
@@ -2586,4 +2589,5 @@ class WS2812Matrix:
 
         self._vb_head_row  = head
         self._vb_write_row = write_row
+
 
