@@ -1,3 +1,6 @@
+__version__ = "1.0.0"
+__author__ = "PlanX Lab Development Team"
+
 from . import (
     math, utime, ustruct,
     machine, micropython,
@@ -560,4 +563,5 @@ class BME680:
             else:
                 self.__cb(*self.iaq(wait=False))
         finally:
+
             self.__poll_busy = False
