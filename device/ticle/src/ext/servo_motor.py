@@ -1,3 +1,6 @@
+__version__ = "1.0.0"
+__author__ = "PlanX Lab Development Team"
+
 from . import (
     utime, array,
     machine,
@@ -300,4 +303,5 @@ class ServoMotor:
 
         def stop(self):
             ServoMotor._stop_all(self._parent, self._indices)
+
 
