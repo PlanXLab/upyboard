@@ -1,3 +1,6 @@
+__version__ = "1.0.0"
+__author__ = "PlanX Lab Development Team"
+
 from . import (
     utime,
     machine, micropython,
@@ -478,3 +481,4 @@ class KY022:
         self.__q[self.__qh] = None
         self.__qh = (self.__qh + 1) % len(self.__q)
         return evt
+
