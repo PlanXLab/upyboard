@@ -1,3 +1,6 @@
+__version__ = "1.0.0"
+__author__ = "PlanX Lab Development Team"
+
 from . import (
     utime,
     machine, micropython,
@@ -390,3 +393,4 @@ class VL53L0X:
                     pass
         finally:
             self.__poll_busy = False
+
