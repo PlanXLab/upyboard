@@ -1,3 +1,6 @@
+__version__ = "1.0.0"
+__author__ = "PlanX Lab Development Team"
+
 from . import (
     utime,
     micropython,
@@ -466,3 +469,4 @@ class HD44780_PCF8574:
                 t = tiles[idx]; idx += 1
                 slot = self.__cb_slot_of(t)
                 self.__data(slot)
+
