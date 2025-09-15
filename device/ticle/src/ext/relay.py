@@ -1,3 +1,6 @@
+__version__ = "1.0.0"
+__author__ = "PlanX Lab Development Team"
+
 from . import (
     utime,
     ticle
@@ -192,3 +195,4 @@ class Relay:
                 self._parent._interlock_groups[i] = None
             
             self.state = Relay.OFF
+
